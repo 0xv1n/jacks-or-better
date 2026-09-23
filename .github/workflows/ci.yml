@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libwayland-dev libasound2-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: check
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows-x64
+          - os: macos-latest
+            name: macos-arm64
+          - os: ubuntu-latest
+            name: linux-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the tag matches the Cargo.toml version
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+      - name: Install system libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libwayland-dev libasound2-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked
+      - name: Package
+        shell: bash
+        run: |
+          pkg="jacks-${GITHUB_REF_NAME}-${{ matrix.name }}"
+          mkdir "$pkg"
+          cp assets/fonts/LICENSE-Inter.txt "$pkg/"
+          case "$RUNNER_OS" in
+            Windows)
+              cp target/release/jacks.exe "$pkg/"
+              7z a "$pkg.zip" "$pkg"
+              ;;
+            macOS)
+              app="$pkg/Jacks or Better.app/Contents"
+              mkdir -p "$app/MacOS"
+              cp target/release/jacks "$app/MacOS/"
+              cat > "$app/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>Jacks or Better</string>
+            <key>CFBundleExecutable</key><string>jacks</string>
+            <key>CFBundleIdentifier</key><string>io.github.0xv1n.jacks</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>${GITHUB_REF_NAME#v}</string>
+            <key>CFBundleVersion</key><string>${GITHUB_REF_NAME#v}</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          EOF
+              ditto -c -k --keepParent "$pkg" "$pkg.zip"
+              ;;
+            *)
+              cp target/release/jacks "$pkg/"
+              tar czf "$pkg.tar.gz" "$pkg"
+              ;;
+          esac
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            jacks-*.zip
+            jacks-*.tar.gz
